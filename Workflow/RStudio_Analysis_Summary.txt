@@ -1,0 +1,162 @@
+RStudio Analysis Summary — HG002 Project
+========================================
+
+This file records the steps performed in RStudio (Windows) using the outputs
+from WSL preprocessing. It includes setup, test loads, and hybrid workflow usage.
+
+---------------------------------------------------------------------
+Step R1 — Set working directory and verify files
+---------------------------------------------------------------------
+Working directory: C:/Users/Q/Documents/BioinfGen2
+
+R code:
+------------------------------------------------------------
+setwd("C:/Users/Q/Documents/BioinfGen2")
+if (!dir.exists("data")) dir.create("data")
+list.files("data")
+------------------------------------------------------------
+
+Expected files in data/:
+- HG002.passq30.SNPs.vcf.gz
+- HG002.passq30.SNPs.vcf.gz.tbi
+- HG002.passq30.SNPs.chr1.vcf.gz
+- HG002.passq30.SNPs.chr1.vcf.gz.tbi
+- HG002.passq30.SNPs.first50k.withhdr.vcf.gz
+- HG002.passq30.SNPs.first50k.withhdr.vcf.gz.tbi
+------------------------------------------------------------
+Step R2 — Set working directory and verify files
+setwd("C:/Users/Q/Documents/BioinfGen2")
+
+
+old <- read.delim("results/variant_summary_passq30.tsv", stringsAsFactors = FALSE)
+new <- read.delim("results/variant_summary_q30_dp10_gq20.tsv", stringsAsFactors = FALSE)
+
+cmp <- merge(old, new, by="metric", suffixes=c("_before","_after"), all=TRUE)
+num <- suppressWarnings(as.numeric(cmp$value_before)); cmp$value_before <- num
+num <- suppressWarnings(as.numeric(cmp$value_after));  cmp$value_after  <- num
+
+cmp$delta      <- cmp$value_after - cmp$value_before
+cmp$pct_change <- ifelse(is.finite(cmp$value_before) & cmp$value_before!=0,
+                         100 * cmp$delta / cmp$value_before, NA_real_)
+
+print(cmp, row.names = FALSE, digits = 6)
+
+
+------------------------------------------------------------
+Results: 
+            metric    value_before   value_after   delta     pct_change
+             indels       1037552        986220   -51332     -4.95%
+               mnps             0             0       0         NA
+ multiallelic_sites             0             0       0         NA
+               snps       3908368       3844092   -64276     -1.64%
+      total_records       4945920       4830312  -115608     -2.34%
+------------------------------------------------------------
+
+What this means
+
+indels
+Before filtering: 1,037,552 insertions/deletions.
+After genotype-level filter: 986,220 remain.
+→ You lost 51,332 indels (~5%) because HG002’s depth (DP) or genotype quality (GQ) was too low at those sites.
+
+mnps (multi-nucleotide polymorphisms)
+Both before and after = 0 (none detected in this callset).
+→ Nothing changed, so no effect.
+
+multiallelic_sites
+Both = 0 because we already normalized/split multiallelics in Step 1.1.
+
+snps
+Before filtering: 3,908,368 SNPs.
+After filter: 3,844,092 SNPs.
+→ You lost 64,276 SNPs (~1.6%) because of low genotype quality.
+
+total_records
+Sum of all variant types (snps + indels + mnps + others).
+Before: 4,945,920.
+After: 4,830,312.
+→ Net loss = 115,608 variants (~2.3%) filtered out for low-quality genotypes.
+
+Key message for GitHub report
+
+The genotype-level filter removed ~2% of total variants, mostly low-quality SNPs and indels.
+
+Ti/Tv ratio (~2.0 genome-wide) remained stable, confirming filtering didn’t distort substitution balance.
+
+No MNPs or multiallelic sites remain (expected since we normalized).
+
+
+------------------------------------------------------------------------------
+Final script to make the plots from wsl varians:
+------------------------------------------------------------------------------
+
+# --- Setup ---
+proj <- "C:/Users/Q/Documents/BioinfGen2"
+in_dir  <- file.path(proj, "results", "summaries")
+plot_dir <- file.path(proj, "results", "plots")
+dir.create(plot_dir, recursive = TRUE, showWarnings = FALSE)
+
+library(readr)
+library(dplyr)
+library(ggplot2)
+
+# --- Load summaries with header repair ---
+
+# Per chromosome
+per_chr <- read_tsv(file.path(in_dir, "rare_counts_per_chr.tsv"), col_names = FALSE)
+colnames(per_chr) <- c("CHROM", "count")
+per_chr <- per_chr %>%
+  filter(CHROM != "CHROM") %>%
+  mutate(count = as.integer(count))
+
+# Impact
+by_imp <- read_tsv(file.path(in_dir, "rare_counts_by_impact.tsv"), col_names = FALSE)
+colnames(by_imp) <- c("IMPACT", "count")
+by_imp <- by_imp %>%
+  filter(IMPACT %in% c("HIGH","MODERATE","LOW")) %>%
+  mutate(count = as.integer(count),
+         IMPACT = factor(IMPACT, levels = c("HIGH","MODERATE","LOW")))
+
+# Genes
+by_gene <- read_tsv(file.path(in_dir, "rare_counts_by_gene.tsv"), col_names = FALSE)
+colnames(by_gene) <- c("SYMBOL","count")
+by_gene <- by_gene %>%
+  filter(SYMBOL != "SYMBOL") %>%
+  mutate(count = as.integer(count))
+
+# --- Plots ---
+
+# Per chromosome
+chr_levels <- c(as.character(1:22),"X","Y","MT")
+per_chr$CHROM <- factor(per_chr$CHROM, levels = chr_levels)
+
+p_chr <- ggplot(per_chr, aes(x = CHROM, y = count)) +
+  geom_col(fill = "steelblue") +
+  theme_bw(base_size = 14) +
+  labs(title = "Rare Variants per Chromosome", x = "Chromosome", y = "Count")
+
+ggsave(file.path(plot_dir, "rare_variants_per_chr.png"), p_chr, width = 8, height = 5, dpi = 300)
+
+# Impact plot
+p_imp <- ggplot(by_imp, aes(x = IMPACT, y = count, fill = IMPACT)) +
+  geom_col() +
+  scale_fill_manual(values = c(HIGH="red", MODERATE="orange", LOW="skyblue")) +
+  theme_bw(base_size = 14) +
+  labs(title = "Rare Variants by Impact", x = "Impact", y = "Count")
+
+ggsave(file.path(plot_dir, "rare_variants_by_impact.png"), p_imp, width = 6, height = 5, dpi = 300)
+
+# Top 20 genes
+top_genes <- by_gene %>% arrange(desc(count)) %>% slice_head(n = 20)
+
+p_gene <- ggplot(top_genes, aes(x = reorder(SYMBOL, count), y = count)) +
+  geom_col(fill = "darkgreen") +
+  coord_flip() +
+  theme_bw(base_size = 14) +
+  labs(title = "Top 20 Genes with Most Rare Variants", x = "Gene", y = "Rare Variant Count")
+
+ggsave(file.path(plot_dir, "rare_variants_top_genes.png"), p_gene, width = 7, height = 7, dpi = 300)
+
+
+
+
